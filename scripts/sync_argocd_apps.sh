@@ -209,39 +209,48 @@ function sync_argocd_apps() {
     _sync_args+=("--resource" "$_resource_selector")
   done
 
-  # run the sync command
-  #  - captures STDERR
-  #  - prints both STDERR and STDOUT to the console
-  local _cmd_stderr
-  local _cmd_exit_code
-  exec 3>&1
-  set +e
-  _cmd_stderr=$(argocd app sync "${_app_names[@]}" "${_sync_args[@]}" 2>&1 >&3 | tee /dev/stderr)
-  _cmd_exit_code=$?
-  set -e
-  exec 3>&-
-
-  # if the command failed, handle the error
-  if [[ $_cmd_exit_code -ne 0 ]]; then
-
-    # handle pruning errors
-    # NOTE: argocd will exit non-zero if pruning is required
-    if [[ "$_cmd_stderr" =~ "resources require pruning" ]]; then
-      echo_yellow ">>> WARNING: There are resources that need to be PRUNED"
-      if [[ "$_prompt_for_prune" == "true" ]]; then
-        ask_sync_again_with_prune "$_resource_selectors" "${_app_names[@]}"
-      else
-        echo_yellow ">>> Continuing without pruning..."
-      fi
-
-    # otherwise, exit with the error code
-    else
-      echo_red ">>> ERROR: Sync Failed"
-      exit $_cmd_exit_code
+  # run the sync command twice per app name (as ofen the first pass reports failed despite suceeding)
+  for _app in "${_app_names[@]}"; do
+    # run the sync command
+    #  - captures STDERR
+    #  - prints both STDERR and STDOUT to the console
+    local _cmd_stderr
+    local _cmd_exit_code
+    exec 3>&1
+    set +e
+    _cmd_stderr=$(argocd app sync "$_app" "${_sync_args[@]}" 2>&1 >&3 | tee /dev/stderr)
+    _cmd_exit_code=$?
+    # Run the command again if there was an error
+    if [[ $_cmd_exit_code -ne 0 ]]; then
+      echo_yellow ">>> WARNING: A Sync Failed (could be a false-positive)"
+      _cmd_stderr=$(argocd app sync "$_app" "${_sync_args[@]}" 2>&1 >&3 | tee /dev/stderr)
+      _cmd_exit_code=$?
     fi
-  else
-    echo_green ">>> Sync Succeeded"
-  fi
+    set -e
+    exec 3>&-
+
+    # if the command failed, handle the error
+    if [[ $_cmd_exit_code -ne 0 ]]; then
+
+      # handle pruning errors
+      # NOTE: argocd will exit non-zero if pruning is required
+      if [[ "$_cmd_stderr" =~ "resources require pruning" ]]; then
+        echo_yellow ">>> WARNING: There are resources that need to be PRUNED"
+        if [[ "$_prompt_for_prune" == "true" ]]; then
+          ask_sync_again_with_prune "$_resource_selectors" "$_app"
+        else
+          echo_yellow ">>> Continuing without pruning..."
+        fi
+
+      # otherwise, exit with the error code
+      else
+        echo_red ">>> ERROR: Sync Failed despite retry"
+        exit $_cmd_exit_code
+      fi
+    else
+      echo_green ">>> Sync Succeeded"
+    fi
+  done
 }
 
 # ask the user to sync again with pruning enabled
